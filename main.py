@@ -1,152 +1,209 @@
-import io
-import uvicorn
-import numpy as np
-import onnxruntime as ort
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+import base64
+import os
+import tempfile
+
 import cv2
-from typing import List
-from numpy import ndarray
-from typing import Tuple
-from PIL import Image
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from ultralytics import YOLO
 
 app = FastAPI()
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change "*" to specific origins for better security
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-class Detection:
-    def __init__(self, 
-                 model_path: str, 
-                 classes: List[str]):
-        self.model_path = model_path
-        self.classes = classes
-        self.model = self.__load_model()
-
-    def __load_model(self):
-        # Load the ONNX model using onnxruntime
-        ort_session = ort.InferenceSession(self.model_path)
-        return ort_session
-
-    def __extract_output(self, 
-                         preds: ndarray, 
-                         image_shape: Tuple[int, int], 
-                         input_shape: Tuple[int, int],
-                         score: float = 0.1,
-                         nms: float = 0.0, 
-                         confidence: float = 0.0) -> dict:
-        class_ids, confs, boxes = [], [], []
-
-        image_height, image_width = image_shape
-        input_height, input_width = input_shape
-        x_factor = image_width / input_width
-        y_factor = image_height / input_height
-
-        rows = preds[0].shape[0]
-        for i in range(rows):
-            row = preds[0][i]
-            conf = row[4]
-            classes_score = row[4:]
-            _, _, _, max_idx = cv2.minMaxLoc(classes_score)
-            class_id = max_idx[1]
-
-            if classes_score[class_id] > score:
-                confs.append(conf)
-                label = self.classes[int(class_id)]
-                class_ids.append(label)
-
-                # Extract boxes
-                x, y, w, h = row[0].item(), row[1].item(), row[2].item(), row[3].item()
-                left = int((x - 0.5 * w) * x_factor)
-                top = int((y - 0.5 * h) * y_factor)
-                width = int(w * x_factor)
-                height = int(h * y_factor)
-                box = [left, top, width, height]
-                boxes.append(box)
-
-        r_class_ids, r_confs, r_boxes = [], [], []
-        indexes = cv2.dnn.NMSBoxes(boxes, confs, confidence, nms) 
-        for i in indexes.flatten():
-            r_class_ids.append(class_ids[i])
-            r_confs.append(confs[i]*100)
-            r_boxes.append(boxes[i])
-
-        return {
-            'boxes': r_boxes, 
-            'confidences': r_confs, 
-            'classes': r_class_ids
-        }
-
-    def __call__(self, image: ndarray, width: int = 640, height: int = 640, score: float = 0.1, nms: float = 0.0, confidence: float = 0.0) -> dict:
-        image_resized = cv2.resize(image, (width, height))  # Resize to the model's input size
-        image_normalized = image_resized.astype(np.float32) / 255.0  # Normalize the image to [0, 1]
-    
-        # Ensure the channels are in RGB (if the model expects RGB, or BGR depending on training)
-        image_input = image_normalized[..., ::-1]  # Convert to RGB if needed (BGR to RGB)
-    
-        # Add batch dimension: (1, 3, height, width)
-        image_input = np.transpose(image_input, (2, 0, 1))  # Change from HWC to CHW format
-        image_input = np.expand_dims(image_input, axis=0)  # Add batch dimension (1, 3, height, width)
-    
-        # Run inference using ONNX Runtime
-        inputs = {self.model.get_inputs()[0].name: image_input}
-        preds = self.model.run(None, inputs)
-    
-        print(f"Predictions shape: {preds[0].shape}")  # Debugging line to check the shape of the model output
-    
-        # Fix the shape issue: Ensure predictions are in the right format
-        preds = np.array(preds[0])  # Convert to numpy array for easier manipulation
-        if preds.ndim == 3:
-            preds = preds.transpose(0, 2, 1)  # Transpose if necessary
-        
-        print(f"Predictions after transpose: {preds.shape}")  # Debugging line
-    
-        # Extract output
-        results = self.__extract_output(
-            preds=preds,
-            image_shape=image.shape[:2],
-            input_shape=(height, width),
-            score=score,
-            nms=nms,
-            confidence=confidence
-        )
-        print(f"Extracted results: {results}")  # Debugging line
-        return results
+model = YOLO("last.pt")
+UPLOAD_DIR = "processed_images"
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR)
 
 
-# Initialize detection model
-detection = Detection(
-    model_path='ctruonxx.onnx', 
-    classes=['Bonnet', 'Bumper', 'Dickey', 'Door', 'Fender', 'Light', 'Windshield']
-)
-
-@app.post('/detection')
-async def post_detection(file: UploadFile = File(...)):
+@app.post("/process-video-frames/")
+async def process_video_frames(file: UploadFile = File(...)):
     try:
-        image = Image.open(io.BytesIO(await file.read())).convert("RGB")
-        print(f"Image shape (before conversion): {np.array(image).shape}")  # Debugging line
-        image = np.array(image)
-        image = image[:, :, ::-1].copy()  # Convert RGB to BGR
-        print(f"Image shape (after conversion): {image.shape}")  # Debugging line
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+            tmp_file.write(await file.read())
+            input_path = tmp_file.name
 
-        results = detection(image)
-        print(f"Detection results: {results}")  # Debugging line
+        cap = cv2.VideoCapture(input_path)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
 
-        results['boxes'] = [box for box in results['boxes']]
-        results['confidences'] = [float(conf) for conf in results['confidences']]
-        results['classes'] = [str(cls) for cls in results['classes']]
-        
-        return results
+        processed_frames = []
+        damage_details = []
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            height, width = frame.shape[:2]
+            new_width = width
+            new_height = height
+            scale = 1
+            # Check if height or width is greater than 640
+             
+            if (width > 640):
+                 # Scale the width to 640 and adjust height to maintain aspect ratio
+                new_width = 640  
+
+            if (height > 420):
+                # Scale the height to 640 and adjust width to maintain aspect ratio
+                new_height = 420  
+
+            """  # New dimensions
+            new_width =  int(width * scale)
+            new_height = int(height * scale) """
+            frame =  cv2.resize(frame, (new_width, new_height))
+            results = model(frame)
+            frame_damages = []
+
+            if len(results[0].boxes) > 0:
+                for result in results:
+                    boxes = result.boxes
+                    for box in boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        confidence = float(box.conf[0])
+                        class_id = int(box.cls[0])
+
+                        damage_info = {
+                            "type": model.names[class_id],
+                            "confidence": f"{confidence:.2f}",
+                            "location": f"x:{int(x1)},y:{int(y1)}",
+                        }
+                        frame_damages.append(damage_info)
+
+                        cv2.rectangle(
+                            frame,
+                            (int(x1), int(y1)),
+                            (int(x2), int(y2)),
+                            (0, 255, 0),
+                            2,
+                        )
+                        label = f"{model.names[class_id]} {confidence:.2f}"
+                        cv2.putText(
+                            frame,
+                            label,
+                            (int(x1), int(y1) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            1,
+                            (0, 255, 0),
+                            2,
+                        )
+
+            _, buffer = cv2.imencode(".jpg", frame)
+            base64_frame = base64.b64encode(buffer).decode("utf-8")
+            processed_frames.append({"frame": base64_frame, "damages": frame_damages})
+            damage_details.extend(frame_damages)
+
+        cap.release()
+        os.remove(input_path)
+
+        return JSONResponse(
+            {
+                "frames": processed_frames,
+                "total_frames": frame_count,
+                "fps": fps,
+                "damage_summary": damage_details,
+            }
+        )
+
     except Exception as e:
-        print(f"Error: {str(e)}")  # Debugging line
+        if "input_path" in locals() and os.path.exists(input_path):
+            os.remove(input_path)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-if __name__ == '__main__':
-    uvicorn.run("main:app", host="127.0.0.1", port=8080)
+@app.post("/process-image/")
+async def process_image(file: UploadFile = File(...)):
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+
+    output_filename = f"processed_{os.urandom(8).hex()}.jpg"
+    output_path = os.path.join(UPLOAD_DIR, output_filename)
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+            tmp_file.write(await file.read())
+            input_path = tmp_file.name
+
+        frame = cv2.imread(input_path)
+        if frame is None:
+            raise HTTPException(status_code=400, detail="Could not read the image")
+
+        damage_details = []
+        height, width = frame.shape[:2]
+        new_width = width
+        new_height = height
+        scale = 1
+        # Check if height or width is greater than 640
+             
+        if (width > 640):
+            # Scale the width to 640 and adjust height to maintain aspect ratio
+            new_width = 640  
+
+        if (height > 420):
+            # Scale the height to 640 and adjust width to maintain aspect ratio
+            new_height = 420  
+
+            """  # New dimensions
+        new_width =  int(width * scale)
+        new_height = int(height * scale) """
+        frame =  cv2.resize(frame, (new_width, new_height))
+        results = model(frame)
+        for result in results:
+            boxes = result.boxes
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                confidence = float(box.conf[0])
+                class_id = int(box.cls[0])
+
+                damage_info = {
+                    "type": model.names[class_id],
+                    "confidence": f"{confidence:.2f}",
+                    "location": f"x:{int(x1)},y:{int(y1)}",
+                }
+                damage_details.append(damage_info)
+
+                cv2.rectangle(
+                    frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2
+                )
+                label = f"{model.names[class_id]} {confidence:.2f}"
+                cv2.putText(
+                    frame,
+                    label,
+                    (int(x1), int(y1) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    2,
+                )
+
+        cv2.imwrite(output_path, frame)
+
+        if os.path.exists(input_path):
+            os.remove(input_path)
+
+        if not os.path.exists(output_path):
+            raise RuntimeError("Failed to create processed image file")
+
+        _, buffer = cv2.imencode(".jpg", frame)
+        base64_image = base64.b64encode(buffer).decode("utf-8")
+
+        return JSONResponse({"image": base64_image, "damage_details": damage_details})
+
+    except Exception as e:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        import traceback
+
+        print(traceback.format_exc())
+
+        raise HTTPException(status_code=500, detail=str(e))
