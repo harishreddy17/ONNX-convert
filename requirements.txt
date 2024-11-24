@@ -1,0 +1,6 @@
+uvicorn
+numpy
+nest-asyncio
+fastapi
+opencv-python
+pillow
