@@ -1,13 +1,13 @@
 import io
-import uvicorn
+import tempfile
 import numpy as np
 import onnxruntime as ort
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
-from typing import List
+import os
+from typing import List, Tuple
 from numpy import ndarray
-from typing import Tuple
 from PIL import Image
 
 app = FastAPI()
@@ -15,7 +15,7 @@ app = FastAPI()
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change "*" to specific origins for better security
+    allow_origins=["http://localhost:3000"],  # Change "*" to specific origins for better security
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -70,13 +70,32 @@ class Detection:
                 box = [left, top, width, height]
                 boxes.append(box)
 
-        r_class_ids, r_confs, r_boxes = [], [], []
-        indexes = cv2.dnn.NMSBoxes(boxes, confs, confidence, nms) 
-        for i in indexes.flatten():
-            r_class_ids.append(class_ids[i])
-            r_confs.append(confs[i]*100)
-            r_boxes.append(boxes[i])
+        # Perform Non-Maximum Suppression (NMS)
+        indexes = cv2.dnn.NMSBoxes(boxes, confs, confidence, nms)
 
+        # Debugging: log the shape and content of indexes
+        print(f"Indexes after NMS: {indexes}")
+
+        # Check if NMS returned valid indexes
+        if indexes is None or len(indexes) == 0:
+            print("No valid bounding boxes after NMS.")
+            return {
+                'boxes': [],
+                'confidences': [],
+                'classes': []
+            }
+        
+        # If indexes is a tuple, extract the first element (it contains the indices)
+        if isinstance(indexes, tuple):
+            indexes = indexes[0]  # Get the first element which contains the indices
+
+        r_class_ids, r_confs, r_boxes = [], [], []
+        for i in indexes.flatten():  # Flatten and iterate over the indices
+            r_class_ids.append(class_ids[i])
+            r_confs.append(float(confs[i]) * 100)  # Multiply by 100 to convert to percentage
+            r_boxes.append(list(boxes[i]))  # Convert to list for serialization
+
+        # Convert to Python-native types for FastAPI serialization
         return {
             'boxes': r_boxes, 
             'confidences': r_confs, 
@@ -98,15 +117,11 @@ class Detection:
         inputs = {self.model.get_inputs()[0].name: image_input}
         preds = self.model.run(None, inputs)
     
-        print(f"Predictions shape: {preds[0].shape}")  # Debugging line to check the shape of the model output
-    
         # Fix the shape issue: Ensure predictions are in the right format
         preds = np.array(preds[0])  # Convert to numpy array for easier manipulation
         if preds.ndim == 3:
             preds = preds.transpose(0, 2, 1)  # Transpose if necessary
         
-        print(f"Predictions after transpose: {preds.shape}")  # Debugging line
-    
         # Extract output
         results = self.__extract_output(
             preds=preds,
@@ -116,37 +131,83 @@ class Detection:
             nms=nms,
             confidence=confidence
         )
-        print(f"Extracted results: {results}")  # Debugging line
         return results
 
 
 # Initialize detection model
 detection = Detection(
-    model_path='ctruonxx.onnx', 
+    model_path='best1.onnx', 
     classes=['Bonnet', 'Bumper', 'Dickey', 'Door', 'Fender', 'Light', 'Windshield']
 )
 
 @app.post('/detection')
 async def post_detection(file: UploadFile = File(...)):
     try:
-        image = Image.open(io.BytesIO(await file.read())).convert("RGB")
-        print(f"Image shape (before conversion): {np.array(image).shape}")  # Debugging line
-        image = np.array(image)
-        image = image[:, :, ::-1].copy()  # Convert RGB to BGR
-        print(f"Image shape (after conversion): {image.shape}")  # Debugging line
-
-        results = detection(image)
-        print(f"Detection results: {results}")  # Debugging line
-
-        results['boxes'] = [box for box in results['boxes']]
-        results['confidences'] = [float(conf) for conf in results['confidences']]
-        results['classes'] = [str(cls) for cls in results['classes']]
+        # Read the file as bytes
+        content = await file.read()
         
-        return results
+        # Check if the uploaded file is a video or image based on file extension
+        if file.filename.endswith(('mp4', 'avi', 'mov', 'mkv')):
+            # Process as video
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_video_file:
+                # Save video content to a temporary file
+                temp_video_file.write(content)
+                temp_video_path = temp_video_file.name
+            
+            cap = cv2.VideoCapture(temp_video_path)
+            if not cap.isOpened():
+                raise HTTPException(status_code=400, detail="Failed to read video file")
+            
+            results = []
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                # Perform detection on each frame
+                detection_results = detection(frame)
+                
+                # Optionally, draw bounding boxes on the frame (for visualization)
+                for box, conf, cls in zip(detection_results['boxes'], detection_results['confidences'], detection_results['classes']):
+                    left, top, width, height = box
+                    cv2.rectangle(frame, (left, top), (left + width, top + height), (0, 255, 0), 2)
+                    cv2.putText(frame, f"{cls} ({conf:.2f}%)", (left, top - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                # Append the results of the current frame
+                results.append(detection_results)
+            
+            cap.release()
+
+            # Optionally, delete the temporary video file
+            os.remove(temp_video_path)
+
+            return {"status": "success", "frames_results": results}
+        
+        elif file.filename.endswith(('jpg', 'jpeg', 'png')):
+            # Process as image
+            image = Image.open(io.BytesIO(content)).convert("RGB")
+            image = np.array(image)
+            image = image[:, :, ::-1].copy()  # Convert RGB to BGR
+            results = detection(image)
+
+            # Convert the results to Python native types for JSON serialization
+            results_serializable = {
+                "boxes": [list(box) for box in results["boxes"]],
+                "confidences": [float(conf) for conf in results["confidences"]],
+                "classes": results["classes"]
+            }
+
+            return {"status": "success", "detection_results": results_serializable}
+
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file format")
+
     except Exception as e:
-        print(f"Error: {str(e)}")  # Debugging line
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Error processing the file: {str(e)}")
+
+
 
 
 if __name__ == '__main__':
-    uvicorn.run("main:app", host="127.0.0.1", port=8080)
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8080)

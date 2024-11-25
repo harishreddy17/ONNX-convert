@@ -3,11 +3,11 @@ import cv2
 import numpy as np
 
 # Initialize the ONNX Runtime session
-model_path = "ctruonxx.onnx"
+model_path = "best1.onnx"
 session = ort.InferenceSession(model_path)
 
 # Define the image path and load the image
-image_path = r"Test_images\3.jpg"  # Replace with the path to your test image
+image_path =  "19.jpg" # Replace with the path to your test image
 image = cv2.imread(image_path)
 
 if image is None:
