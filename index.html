@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Car Damage Detection</title>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <h1>Car Damage Detection</h1>
+
+    <input type="file" id="video-upload" accept="video/*" />
+    <div id="video-container">
+      <video id="video" autoplay controls></video>
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
