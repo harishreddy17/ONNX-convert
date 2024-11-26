@@ -1,157 +1,199 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import axios from 'axios';
 import './index.css';
 
 function App() {
-  const [video, setVideo] = useState(null);
-  const [videoUrl, setVideoUrl] = useState(null);
+  const [file, setFile] = useState(null);
+  const [fileUrl, setFileUrl] = useState(null);
   const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const videoRef = useRef(null); // To access the video element
-  const canvasRef = useRef(null); // To access the canvas element
+  const [isVideo, setIsVideo] = useState(false);
 
-  const handleVideoChange = (event) => {
-    const file = event.target.files[0];
-    if (file) {
-      setVideo(file);
-      setVideoUrl(URL.createObjectURL(file)); // Preview the selected video
+  const handleFileChange = (event) => {
+    const selectedFile = event.target.files[0];
+    if (selectedFile) {
+      setFile(selectedFile);
+      setFileUrl(URL.createObjectURL(selectedFile)); // Preview the selected file
+      setIsVideo(selectedFile.type.startsWith("video")); // Check if the file is a video
     }
   };
 
-  const handleVideoUpload = async () => {
-    if (!video) {
-      alert("Please upload a video.");
+  const handleFileUpload = async () => {
+    if (!file) {
+      alert("Please upload a file.");
       return;
     }
 
     const formData = new FormData();
-    formData.append("file", video);
+    formData.append("file", file);
 
     try {
-      setLoading(true);  // Start loading
       const response = await axios.post('http://127.0.0.1:8000/detection', formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
         }
       });
-
-      // Log the response data to check its structure
-      console.log("Backend Response:", response.data);
-
       setResult(response.data); // Set the result from the backend
     } catch (error) {
-      console.error("Error uploading video:", error);
-      alert("An error occurred while processing the video.");
-    } finally {
-      setLoading(false);  // End loading
+      console.error("Error uploading file:", error);
+      alert("An error occurred while processing the file.");
     }
   };
 
-  const drawBoundingBoxes = (ctx, boxes, confidences, classes) => {
-    // Ensure boxes, confidences, and classes are valid arrays before drawing
-    if (!Array.isArray(boxes) || !Array.isArray(confidences) || !Array.isArray(classes)) return;
-
-    // Log values to debug drawing logic
-    console.log("Boxes:", boxes);
-    console.log("Confidences:", confidences);
-    console.log("Classes:", classes);
-
+  const drawBoundingBoxes = (ctx, boxes, confidences, classes, originalWidth, originalHeight, canvasWidth, canvasHeight) => {
     boxes.forEach((box, index) => {
       const [x, y, width, height] = box;
       const confidence = confidences[index];
       const className = classes[index];
-
+  
+      // Scale the bounding boxes to fit the resized canvas
+      const scaledX = x * (canvasWidth / originalWidth);
+      const scaledY = y * (canvasHeight / originalHeight);
+      const scaledWidth = width * (canvasWidth / originalWidth);
+      const scaledHeight = height * (canvasHeight / originalHeight);
+  
       // Draw the bounding box
       ctx.beginPath();
-      ctx.rect(x, y, width, height);
+      ctx.rect(scaledX, scaledY, scaledWidth, scaledHeight);
       ctx.lineWidth = 2;
       ctx.strokeStyle = "red";
       ctx.fillStyle = "red";
       ctx.stroke();
-
+  
       // Draw the label and confidence
       ctx.font = "16px Arial";
       ctx.fillStyle = "red";
-      ctx.fillText(`${className} (${Math.round(confidence * 100)}%)`, x, y > 10 ? y - 5 : 10);
+      ctx.fillText(`${className} (${Math.round(confidence)}%)`, scaledX, scaledY > 10 ? scaledY - 5 : 10);
     });
   };
 
-  const processVideoFrame = () => {
-    if (!videoRef.current || !canvasRef.current || !result) return;
-
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-
-    // Set the canvas dimensions to match the video
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    // Draw the video frame onto the canvas
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    // Log the result before drawing bounding boxes
-    console.log("Detection Result:", result);
-
-    const { boxes = [], confidences = [], classes = [] } = result.detection_results || {};
-
-    // Log detection arrays to debug
-    console.log("Boxes:", boxes);
-    console.log("Confidences:", confidences);
-    console.log("Classes:", classes);
-
-    // Draw bounding boxes if arrays are not empty
-    if (boxes.length && confidences.length && classes.length) {
-      drawBoundingBoxes(ctx, boxes, confidences, classes);
+  const renderDetectionResults = () => {
+    if (!result || !fileUrl) return;
+  
+    const desiredWidth = 640; // Example of resizing the video to a smaller width
+    const isVideoElement = isVideo; // Assuming `isVideo` is a flag to check if it's a video
+  
+    if (isVideoElement) {
+      // Check if the video element already exists
+      let videoElement = document.getElementById('detectionVideo');
+      
+      if (!videoElement) {
+        // Create the video element only if it doesn't already exist
+        videoElement = document.createElement('video');
+        videoElement.id = 'detectionVideo';  // Ensure a unique ID
+        videoElement.src = fileUrl;
+        videoElement.controls = true;
+        videoElement.autoplay = true;
+        videoElement.loop = false;  // Set loop to false if you want the video to play only once
+        videoElement.style.width = `${desiredWidth}px`;  // Set desired width for the video
+        videoElement.style.height = 'auto';  // Maintain aspect ratio
+  
+        // Append the video to the container (only once)
+        document.getElementById('videoContainer').appendChild(videoElement);
+      }
+  
+      // When the video is loaded, start drawing
+      videoElement.onloadeddata = () => {
+        const canvas = document.getElementById('detectionCanvas');
+        const ctx = canvas.getContext('2d');
+  
+        // Set canvas dimensions to match the resized video
+        const aspectRatio = videoElement.videoWidth / videoElement.videoHeight;
+        const videoHeight = desiredWidth / aspectRatio;  // Calculate height based on width and aspect ratio
+  
+        canvas.width = desiredWidth;
+        canvas.height = videoHeight;
+  
+        // Set up video play behavior
+        videoElement.play();
+  
+        // Process each frame and update bounding boxes
+        videoElement.ontimeupdate = () => {
+          // Clear previous frame (if any)
+          ctx.clearRect(0, 0, canvas.width, canvas.height); 
+          ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height); // Draw the resized video
+  
+          // Calculate the index for the current frame
+          const totalFrames = result.frames_results.length;
+          const currentTime = videoElement.currentTime;
+          const currentFrameIndex = Math.floor((currentTime / videoElement.duration) * totalFrames);
+  
+          // Check if the current frame has detection results
+          const frameResults = result.frames_results[currentFrameIndex];
+  
+          if (frameResults) {
+            const { boxes, confidences, classes } = frameResults;
+  
+            // Draw bounding boxes and scale them to the resized video
+            drawBoundingBoxes(ctx, boxes, confidences, classes, videoElement.videoWidth, videoElement.videoHeight, canvas.width, canvas.height);
+          }
+        };
+      };
     } else {
-      console.log("No bounding boxes detected.");
+      // Handle image detection results (same as before)
+      const { boxes, confidences, classes } = result.detection_results;
+  
+      const img = new Image();
+      img.src = fileUrl;
+      img.onload = () => {
+        const canvas = document.getElementById('detectionCanvas');
+        const ctx = canvas.getContext('2d');
+  
+        // Resize the canvas if necessary (for the image size)
+        const aspectRatio = img.width / img.height;
+        const imgHeight = desiredWidth / aspectRatio;  // Calculate height based on width and aspect ratio
+  
+        canvas.width = desiredWidth;
+        canvas.height = imgHeight;
+  
+        // Draw the image on the canvas
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  
+        // Draw bounding boxes
+        drawBoundingBoxes(ctx, boxes, confidences, classes, img.width, img.height, canvas.width, canvas.height);
+      };
     }
   };
-
-  const handlePlay = () => {
-    if (videoRef.current) {
-      videoRef.current.play();
-      setInterval(processVideoFrame, 100); // Process every 100ms (10 FPS), adjust as needed
-    }
-  };
+  
+  // Modify the drawBoundingBoxes function to scale bounding boxes correctly
+  
+  
+  
+  
 
   return (
     <div className="App">
-      <h1>Object Detection using FastAPI and React - Video Upload</h1>
+      <h1>Object Detection using FastAPI and React</h1>
 
-      {/* Video Upload */}
-      <input type="file" accept="video/*" onChange={handleVideoChange} />
-      <button onClick={handleVideoUpload} disabled={loading}>
-        {loading ? "Uploading..." : "Upload Video for Detection"}
-      </button>
+      {/* File Upload */}
+      <input type="file" accept="image/*,video/*" onChange={handleFileChange} />
+      <button onClick={handleFileUpload}>Upload File for Detection</button>
 
-      {videoUrl && (
+      {fileUrl && (
         <div>
-          <h2>Uploaded Video</h2>
-          <video
-            ref={videoRef}
-            src={videoUrl}
-            controls
-            width="100%"
-            style={{ marginBottom: '20px' }}
-          ></video>
-          <button onClick={handlePlay} disabled={loading}>
-            Play Video with Detection
-          </button>
+          <h2>Uploaded File</h2>
+          {isVideo ? (
+            <div id="videoContainer">
+              {/* Video element will be dynamically inserted here */}
+            </div>
+          ) : (
+            <img src={fileUrl} alt="Uploaded" style={{ maxWidth: '100%', height: 'auto' }} />
+          )}
         </div>
       )}
 
       {result && (
         <div>
           <h2>Detection Results</h2>
-          <canvas
-            ref={canvasRef}
-            style={{ border: '1px solid #000', maxWidth: '100%' }}
-          ></canvas>
+          <canvas id="detectionCanvas" style={{ border: '1px solid #000' }}></canvas>
         </div>
       )}
+
+      {/* Trigger rendering when results are available */}
+      {result && renderDetectionResults()}
     </div>
   );
 }
+
+
 
 export default App;
