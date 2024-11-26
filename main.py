@@ -15,7 +15,7 @@ app = FastAPI()
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Change "*" to specific origins for better security
+    allow_origins=["http://localhost:3000"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -30,7 +30,6 @@ class Detection:
         self.model = self.__load_model()
 
     def __load_model(self):
-        # Load the ONNX model using onnxruntime
         ort_session = ort.InferenceSession(self.model_path)
         return ort_session
 
@@ -38,8 +37,8 @@ class Detection:
                          preds: ndarray, 
                          image_shape: Tuple[int, int], 
                          input_shape: Tuple[int, int],
-                         score: float = 0.1,
-                         nms: float = 0.0, 
+                         score: float = 0.01,
+                         nms: float = 0.3, 
                          confidence: float = 0.0) -> dict:
         class_ids, confs, boxes = [], [], []
 
@@ -102,7 +101,7 @@ class Detection:
             'classes': r_class_ids
         }
 
-    def __call__(self, image: ndarray, width: int = 640, height: int = 640, score: float = 0.1, nms: float = 0.0, confidence: float = 0.0) -> dict:
+    def __call__(self, image: ndarray, width: int = 640, height: int = 640, score: float = 0.01, nms: float = 0.3, confidence: float = 0.0) -> dict:
         image_resized = cv2.resize(image, (width, height))  # Resize to the model's input size
         image_normalized = image_resized.astype(np.float32) / 255.0  # Normalize the image to [0, 1]
     
